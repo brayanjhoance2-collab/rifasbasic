@@ -8,6 +8,9 @@ export async function GET(request) {
         const error = searchParams.get('error')
         const state = searchParams.get('state')
 
+        // Usar la URL base del .env
+        const baseUrl = process.env.NEXT_PUBLIC_BASE_URL
+
         // Si el usuario canceló la autorización
         if (error) {
             console.log('Error en OAuth:', error)
@@ -16,14 +19,14 @@ export async function GET(request) {
                 : 'Error en la autorización de Google'
                 
             return NextResponse.redirect(
-                new URL(`/googlesheets?error=${encodeURIComponent(errorMessage)}`, request.url)
+                new URL(`/googlesheets?error=${encodeURIComponent(errorMessage)}`, baseUrl)
             )
         }
 
         // Si no hay código de autorización
         if (!code) {
             return NextResponse.redirect(
-                new URL('/googlesheets?error=Código de autorización no recibido', request.url)
+                new URL('/googlesheets?error=Código de autorización no recibido', baseUrl)
             )
         }
 
@@ -32,11 +35,11 @@ export async function GET(request) {
 
         if (resultado.success) {
             return NextResponse.redirect(
-                new URL('/googlesheets?success=Conectado exitosamente a Google Sheets', request.url)
+                new URL('/googlesheets?success=Conectado exitosamente a Google Sheets', baseUrl)
             )
         } else {
             return NextResponse.redirect(
-                new URL(`/googlesheets?error=${encodeURIComponent(resultado.error)}`, request.url)
+                new URL(`/googlesheets?error=${encodeURIComponent(resultado.error)}`, baseUrl)
             )
         }
 
@@ -44,7 +47,7 @@ export async function GET(request) {
         console.log('Error en callback de Google:', error)
         
         return NextResponse.redirect(
-            new URL('/googlesheets?error=Error interno del servidor', request.url)
+            new URL('/googlesheets?error=Error interno del servidor', process.env.NEXT_PUBLIC_BASE_URL)
         )
     }
 }
