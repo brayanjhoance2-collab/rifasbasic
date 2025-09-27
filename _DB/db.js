@@ -1,4 +1,4 @@
-/** */
+/** 
 import mysql from 'mysql2/promise';
 const db = mysql.createPool({
   host: 'localhost',      // Host local
@@ -10,8 +10,8 @@ const db = mysql.createPool({
 
 export default db;
 
-
-/*
+*/
+/**/
 // lib/db.ts o lib/database.ts
 import mysql from 'mysql2/promise';
 const db = mysql.createPool({
@@ -21,7 +21,7 @@ const db = mysql.createPool({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
 });
-export default db;*/
+export default db;
 
 // cd 'C:\Program Files\MySQL\MySQL Server 9.0\bin\'
 // cd C:\Program Files\MySQL\MySQL Server 9.0\bin
