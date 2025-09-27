@@ -6,8 +6,7 @@ import {
     obtenerUsuarioActual,
     obtenerConfiguracionGoogleSheets,
     guardarConfiguracionGoogle,
-    conectarGoogleSheets,
-    desconectarGoogleSheets,
+    verificarCredenciales,
     obtenerSpreadsheets,
     obtenerDatosSheet,
     exportarContactosASheet,
@@ -31,6 +30,7 @@ export default function GoogleSheetsPage() {
     const [loadingSheets, setLoadingSheets] = useState(false)
     const [loadingDatos, setLoadingDatos] = useState(false)
     const [procesando, setProcesando] = useState(false)
+    const [verificando, setVerificando] = useState(false)
     const [mensajeError, setMensajeError] = useState('')
     const [mensajeExito, setMensajeExito] = useState('')
     const [mostrarModalNuevoSheet, setMostrarModalNuevoSheet] = useState(false)
@@ -43,38 +43,34 @@ export default function GoogleSheetsPage() {
     const [clientSecret, setClientSecret] = useState('')
     const [redirectUri, setRedirectUri] = useState('')
 
-useEffect(() => {
-    verificarYCargarDatos()
-}, [])
+    useEffect(() => {
+        verificarYCargarDatos()
+    }, [])
 
-// AGREGA ESTE useEffect AQUÍ
-useEffect(() => {
-    // Manejar parámetros de callback de Google
-    const urlParams = new URLSearchParams(window.location.search)
-    const error = urlParams.get('error')
-    const success = urlParams.get('success')
-    
-    if (error) {
-        setMensajeError(decodeURIComponent(error))
-        // Limpiar URL
-        window.history.replaceState({}, '', '/googlesheets')
-    }
-    
-    if (success) {
-        setMensajeExito(decodeURIComponent(success))
-        // Limpiar URL y recargar configuración
-        window.history.replaceState({}, '', '/googlesheets')
-        setTimeout(() => {
-            cargarConfiguracion()
-        }, 1000)
-    }
-}, [])
+    useEffect(() => {
+        const urlParams = new URLSearchParams(window.location.search)
+        const error = urlParams.get('error')
+        const success = urlParams.get('success')
+        
+        if (error) {
+            setMensajeError(decodeURIComponent(error))
+            window.history.replaceState({}, '', '/googlesheets')
+        }
+        
+        if (success) {
+            setMensajeExito(decodeURIComponent(success))
+            window.history.replaceState({}, '', '/googlesheets')
+            setTimeout(() => {
+                cargarConfiguracion()
+            }, 1000)
+        }
+    }, [])
 
-useEffect(() => {
-    if (spreadsheetSeleccionado) {
-        cargarSheets()
-    }
-}, [spreadsheetSeleccionado])
+    useEffect(() => {
+        if (spreadsheetSeleccionado) {
+            cargarSheets()
+        }
+    }, [spreadsheetSeleccionado])
 
     useEffect(() => {
         if (sheetSeleccionado && spreadsheetSeleccionado) {
@@ -108,7 +104,7 @@ useEffect(() => {
             const config = await obtenerConfiguracionGoogleSheets()
             setConfiguracion(config)
             
-            if (config && config.conectado) {
+            if (config && config.credenciales_validas) {
                 await cargarSpreadsheets()
             }
         } catch (error) {
@@ -143,6 +139,29 @@ useEffect(() => {
             setMensajeError('Error al guardar configuración: ' + error.message)
         } finally {
             setProcesando(false)
+        }
+    }
+
+    const manejarVerificarCredenciales = async () => {
+        try {
+            setVerificando(true)
+            setMensajeError('')
+            
+            const resultado = await verificarCredenciales()
+            
+            if (resultado.success) {
+                setMensajeExito('Credenciales verificadas exitosamente. Abriendo ventana de autorización...')
+                // Abrir ventana de autorización OAuth
+                window.open(resultado.authUrl, '_blank', 'width=500,height=600')
+            } else {
+                setMensajeError(resultado.error || 'Error al verificar credenciales')
+            }
+            
+        } catch (error) {
+            console.log('Error al verificar credenciales:', error)
+            setMensajeError('Error al verificar credenciales')
+        } finally {
+            setVerificando(false)
         }
     }
 
@@ -188,50 +207,6 @@ useEffect(() => {
             setMensajeError('Error al cargar datos del sheet')
         } finally {
             setLoadingDatos(false)
-        }
-    }
-
-    const manejarConectar = async () => {
-        try {
-            setProcesando(true)
-            setMensajeError('')
-            
-            const resultado = await conectarGoogleSheets()
-            
-            if (resultado.success) {
-                window.open(resultado.authUrl, '_blank')
-                setMensajeExito('Ventana de autenticación abierta. Complete el proceso en la nueva ventana.')
-            } else {
-                setMensajeError(resultado.error || 'Error al conectar con Google Sheets')
-            }
-            
-        } catch (error) {
-            console.log('Error al conectar:', error)
-            setMensajeError('Error al conectar con Google Sheets')
-        } finally {
-            setProcesando(false)
-        }
-    }
-
-    const manejarDesconectar = async () => {
-        try {
-            setProcesando(true)
-            setMensajeError('')
-            
-            await desconectarGoogleSheets()
-            setMensajeExito('Desconectado de Google Sheets')
-            setConfiguracion(null)
-            setSpreadsheets([])
-            setSheets([])
-            setDatosSheet([])
-            setSpreadsheetSeleccionado('')
-            setSheetSeleccionado('')
-            
-        } catch (error) {
-            console.log('Error al desconectar:', error)
-            setMensajeError('Error al desconectar')
-        } finally {
-            setProcesando(false)
         }
     }
 
@@ -424,33 +399,36 @@ useEffect(() => {
             <div className={estilos.headerSection}>
                 <div className={estilos.titleContainer}>
                     <h1>Google Sheets</h1>
-                    <p>Conecta y sincroniza tus datos con Google Sheets</p>
+                    <p>Configura y sincroniza tus datos con Google Sheets</p>
                 </div>
 
                 <div className={estilos.connectionCard}>
                     <div className={estilos.connectionInfo}>
                         <div className={estilos.connectionStatus}>
-                            <ion-icon name={configuracion?.conectado ? "checkmark-circle" : "close-circle"}></ion-icon>
-                            <span className={configuracion?.conectado ? estilos.conectado : estilos.desconectado}>
-                                {configuracion?.conectado ? 'Conectado' : 'Desconectado'}
+                            <ion-icon name={configuracion?.credenciales_validas ? "checkmark-circle" : "close-circle"}></ion-icon>
+                            <span className={configuracion?.credenciales_validas ? estilos.conectado : estilos.desconectado}>
+                                {configuracion?.credenciales_validas ? 'Conectado' : 'Desconectado'}
                             </span>
                         </div>
                         
-                        {configuracion?.conectado && configuracion?.conexion && (
+                        {configuracion?.configuracion_guardada && (
                             <div className={estilos.connectionDetails}>
                                 <p>
-                                    <strong>Email:</strong> {configuracion.conexion.email || 'No disponible'}
+                                    <strong>Estado:</strong> 
+                                    {configuracion?.credenciales_validas ? ' Credenciales válidas y conectado' : ' Credenciales guardadas, pendiente de verificación'}
                                 </p>
-                                <p>
-                                    <strong>Última conexión:</strong> {formatearFecha(configuracion.conexion.fecha_conexion)}
-                                </p>
+                                {configuracion?.ultima_verificacion && (
+                                    <p>
+                                        <strong>Última verificación:</strong> {formatearFecha(configuracion.ultima_verificacion)}
+                                    </p>
+                                )}
                             </div>
                         )}
                         
-                        {!configuracion?.configuracion_disponible && (
+                        {!configuracion?.configuracion_guardada && (
                             <div className={estilos.configAlert}>
                                 <ion-icon name="warning-outline"></ion-icon>
-                                <span>Configure las credenciales de Google antes de conectar</span>
+                                <span>Configure las credenciales de Google API para comenzar</span>
                             </div>
                         )}
                     </div>
@@ -462,37 +440,22 @@ useEffect(() => {
                                 className={`${estilos.button} ${estilos.buttonSecondary}`}
                             >
                                 <ion-icon name="settings-outline"></ion-icon>
-                                Configurar API
+                                {configuracion?.configuracion_guardada ? 'Reconfigurar API' : 'Configurar API'}
                             </button>
                         )}
                         
-                        {configuracion?.conectado ? (
+                        {configuracion?.configuracion_guardada && !configuracion?.credenciales_validas && (
                             <button 
-                                onClick={manejarDesconectar}
-                                disabled={procesando}
-                                className={`${estilos.button} ${estilos.buttonDanger}`}
-                            >
-                                {procesando ? (
-                                    <div className={estilos.loadingSpinner}></div>
-                                ) : (
-                                    <>
-                                        <ion-icon name="log-out-outline"></ion-icon>
-                                        Desconectar
-                                    </>
-                                )}
-                            </button>
-                        ) : (
-                            <button 
-                                onClick={manejarConectar}
-                                disabled={procesando || !configuracion?.configuracion_disponible}
+                                onClick={manejarVerificarCredenciales}
+                                disabled={verificando}
                                 className={`${estilos.button} ${estilos.buttonPrimary}`}
                             >
-                                {procesando ? (
+                                {verificando ? (
                                     <div className={estilos.loadingSpinner}></div>
                                 ) : (
                                     <>
-                                        <ion-icon name="logo-google"></ion-icon>
-                                        Conectar con Google
+                                        <ion-icon name="checkmark-circle-outline"></ion-icon>
+                                        Verificar Credenciales
                                     </>
                                 )}
                             </button>
@@ -501,7 +464,7 @@ useEffect(() => {
                 </div>
             </div>
 
-            {configuracion?.conectado && (
+            {configuracion?.credenciales_validas && (
                 <div className={estilos.mainContent}>
                     <div className={estilos.controlsSection}>
                         <div className={estilos.selectorsContainer}>
@@ -673,7 +636,6 @@ useEffect(() => {
                 </div>
             )}
 
-            {/* Modal Configuración */}
             {mostrarModalConfiguracion && (
                 <div className={estilos.modalOverlay}>
                     <div className={estilos.modalConfig}>
@@ -689,7 +651,7 @@ useEffect(() => {
                         
                         <div className={estilos.modalContent}>
                             <div className={estilos.configInstructions}>
-                                <p>Para conectar con Google Sheets necesitas crear credenciales en Google Cloud Console:</p>
+                                <p>Para conectar con Google Sheets necesitas credenciales OAuth 2.0:</p>
                                 <ol>
                                     <li>Ve a <a href="https://console.cloud.google.com" target="_blank" rel="noopener noreferrer">Google Cloud Console</a></li>
                                     <li>Crea un proyecto o selecciona uno existente</li>
@@ -705,7 +667,7 @@ useEffect(() => {
                                     type="text"
                                     value={clientId}
                                     onChange={(e) => setClientId(e.target.value)}
-                                    placeholder="123456789-abcdefg.apps.googleusercontent.com"
+                                    placeholder="1006474255515-uvejqdglkk2qdrun442qfasbmflf3d93.apps.googleusercontent.com"
                                     className={estilos.input}
                                 />
                             </div>
@@ -716,7 +678,7 @@ useEffect(() => {
                                     type="password"
                                     value={clientSecret}
                                     onChange={(e) => setClientSecret(e.target.value)}
-                                    placeholder="GOCSPX-xxxxxxxxxxxxxxxxxxxxxxxx"
+                                    placeholder="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"
                                     className={estilos.input}
                                 />
                             </div>
@@ -727,7 +689,7 @@ useEffect(() => {
                                     type="url"
                                     value={redirectUri}
                                     onChange={(e) => setRedirectUri(e.target.value)}
-                                    placeholder="http://localhost:3000/api/auth/google/callback"
+                                    placeholder="https://rifasbasic-production.up.railway.app/api/auth/google/callback"
                                     className={estilos.input}
                                 />
                                 <small className={estilos.inputHelp}>
@@ -762,7 +724,6 @@ useEffect(() => {
                 </div>
             )}
 
-            {/* Modal Nueva Pestaña */}
             {mostrarModalNuevoSheet && (
                 <div className={estilos.modalOverlay}>
                     <div className={estilos.modal}>

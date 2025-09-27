@@ -72,26 +72,6 @@ export async function obtenerUsuarioActual() {
     }
 }
 
-async function obtenerConfiguracionGoogle() {
-    try {
-        const [rows] = await db.execute(`
-            SELECT client_id, client_secret, redirect_uri 
-            FROM google_sheets_configuracion 
-            WHERE activa = 1 
-            LIMIT 1
-        `)
-
-        if (rows.length === 0) {
-            throw new Error('No hay configuración activa de Google Sheets. Configure las credenciales primero.')
-        }
-
-        return rows[0]
-    } catch (error) {
-        console.log('Error al obtener configuración Google:', error)
-        throw error
-    }
-}
-
 export async function guardarConfiguracionGoogle(clientId, clientSecret, redirectUri) {
     try {
         const usuario = await obtenerUsuarioActual()
@@ -135,23 +115,38 @@ export async function obtenerConfiguracionGoogleSheets() {
             throw new Error('Usuario no autenticado')
         }
 
-        const [conexionRows] = await db.execute(`
-            SELECT * FROM google_sheets_conexiones 
-            WHERE usuario_id = ?
-            ORDER BY fecha_creacion DESC 
-            LIMIT 1
-        `, [usuario.id])
-
         const [configRows] = await db.execute(`
-            SELECT id, client_id, redirect_uri, activa 
+            SELECT id, client_id, redirect_uri, activa, fecha_creacion
             FROM google_sheets_configuracion 
             WHERE activa = 1 
             LIMIT 1
         `)
 
+        const [conexionRows] = await db.execute(`
+            SELECT * FROM google_sheets_conexiones 
+            WHERE usuario_id = ? AND estado = 'conectado'
+            ORDER BY fecha_creacion DESC 
+            LIMIT 1
+        `, [usuario.id])
+
+        const [logRows] = await db.execute(`
+            SELECT fecha_operacion, estado_operacion 
+            FROM google_sheets_log 
+            WHERE usuario_id = ? AND operacion = 'verificar_credenciales'
+            ORDER BY fecha_operacion DESC 
+            LIMIT 1
+        `, [usuario.id])
+
         return {
-            configuracion_disponible: configRows.length > 0,
-            conectado: conexionRows.length > 0 && conexionRows[0].estado === 'conectado',
+            configuracion_guardada: configRows.length > 0,
+            credenciales_validas: conexionRows.length > 0,
+            ultima_verificacion: logRows.length > 0 ? logRows[0].fecha_operacion : null,
+            configuracion: configRows.length > 0 ? {
+                id: configRows[0].id,
+                client_id: configRows[0].client_id,
+                redirect_uri: configRows[0].redirect_uri,
+                fecha_creacion: configRows[0].fecha_creacion
+            } : null,
             conexion: conexionRows.length > 0 ? {
                 id: conexionRows[0].id,
                 email: conexionRows[0].email_google,
@@ -167,14 +162,34 @@ export async function obtenerConfiguracionGoogleSheets() {
     }
 }
 
-export async function conectarGoogleSheets() {
+async function obtenerConfiguracionActiva() {
+    try {
+        const [rows] = await db.execute(`
+            SELECT client_id, client_secret, redirect_uri 
+            FROM google_sheets_configuracion 
+            WHERE activa = 1 
+            LIMIT 1
+        `)
+
+        if (rows.length === 0) {
+            throw new Error('No hay configuración activa de Google Sheets')
+        }
+
+        return rows[0]
+    } catch (error) {
+        console.log('Error al obtener configuración activa:', error)
+        throw error
+    }
+}
+
+export async function verificarCredenciales() {
     try {
         const usuario = await obtenerUsuarioActual()
         if (!usuario) {
             throw new Error('Usuario no autenticado')
         }
 
-        const config = await obtenerConfiguracionGoogle()
+        const config = await obtenerConfiguracionActiva()
 
         const oauth2Client = new google.auth.OAuth2(
             config.client_id,
@@ -182,30 +197,119 @@ export async function conectarGoogleSheets() {
             config.redirect_uri
         )
 
+        const scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive.readonly',
+            'https://www.googleapis.com/auth/userinfo.email'
+        ]
+
         const authUrl = oauth2Client.generateAuthUrl({
             access_type: 'offline',
-            scope: [
-                'https://www.googleapis.com/auth/spreadsheets',
-                'https://www.googleapis.com/auth/userinfo.email',
-                'https://www.googleapis.com/auth/drive.readonly'
-            ],
+            scope: scopes,
             include_granted_scopes: true,
             prompt: 'consent'
         })
 
+        await db.execute(`
+            INSERT INTO google_sheets_log (
+                usuario_id,
+                operacion,
+                estado_operacion,
+                detalles
+            ) VALUES (?, 'verificar_credenciales', 'exitoso', ?)
+        `, [usuario.id, JSON.stringify({ 
+            client_id: config.client_id,
+            redirect_uri: config.redirect_uri 
+        })])
+
         return {
             success: true,
             authUrl: authUrl,
-            message: 'Redirigir a autenticación de Google'
+            message: 'Credenciales verificadas exitosamente'
         }
 
     } catch (error) {
-        console.log('Error al conectar con Google:', error)
+        console.log('Error al verificar credenciales:', error)
+        
+        const usuario = await obtenerUsuarioActual()
+        if (usuario) {
+            await db.execute(`
+                INSERT INTO google_sheets_log (
+                    usuario_id,
+                    operacion,
+                    estado_operacion,
+                    mensaje_error
+                ) VALUES (?, 'verificar_credenciales', 'fallido', ?)
+            `, [usuario.id, error.message])
+        }
+        
         return {
             success: false,
             error: error.message
         }
     }
+}
+
+async function obtenerClienteAutenticado() {
+    const usuario = await obtenerUsuarioActual()
+    if (!usuario) {
+        throw new Error('Usuario no autenticado')
+    }
+
+    const [conexionRows] = await db.execute(`
+        SELECT * FROM google_sheets_conexiones 
+        WHERE usuario_id = ? AND estado = 'conectado'
+        LIMIT 1
+    `, [usuario.id])
+
+    if (conexionRows.length === 0) {
+        throw new Error('No hay conexión activa con Google Sheets. Debe autorizar primero.')
+    }
+
+    const conexion = conexionRows[0]
+    const config = await obtenerConfiguracionActiva()
+
+    const oauth2Client = new google.auth.OAuth2(
+        config.client_id,
+        config.client_secret,
+        config.redirect_uri
+    )
+
+    oauth2Client.setCredentials({
+        access_token: conexion.access_token,
+        refresh_token: conexion.refresh_token,
+        expiry_date: conexion.expires_at
+    })
+
+    if (oauth2Client.isTokenExpiring()) {
+        try {
+            const { credentials } = await oauth2Client.refreshAccessToken()
+            oauth2Client.setCredentials(credentials)
+            
+            await db.execute(`
+                UPDATE google_sheets_conexiones 
+                SET access_token = ?,
+                    expires_at = ?
+                WHERE usuario_id = ?
+            `, [
+                credentials.access_token,
+                credentials.expiry_date ? new Date(credentials.expiry_date) : null,
+                usuario.id
+            ])
+        } catch (refreshError) {
+            console.log('Error al refrescar token:', refreshError)
+            
+            await db.execute(`
+                UPDATE google_sheets_conexiones 
+                SET estado = 'token_expirado'
+                WHERE usuario_id = ?
+            `, [usuario.id])
+            
+            throw new Error('Token expirado, debe volver a autorizar su cuenta')
+        }
+    }
+
+    return oauth2Client
 }
 
 export async function procesarCallbackGoogle(code) {
@@ -215,7 +319,7 @@ export async function procesarCallbackGoogle(code) {
             throw new Error('Usuario no autenticado')
         }
 
-        const config = await obtenerConfiguracionGoogle()
+        const config = await obtenerConfiguracionActiva()
 
         const oauth2Client = new google.auth.OAuth2(
             config.client_id,
@@ -265,9 +369,12 @@ export async function procesarCallbackGoogle(code) {
                 usuario_id,
                 operacion,
                 estado_operacion,
-                mensaje_error
-            ) VALUES (?, 'conectar', 'exitoso', NULL)
-        `, [usuario.id])
+                detalles
+            ) VALUES (?, 'conectar', 'exitoso', ?)
+        `, [usuario.id, JSON.stringify({
+            email: userInfo.data.email,
+            nombre: userInfo.data.name
+        })])
 
         return {
             success: true,
@@ -296,108 +403,9 @@ export async function procesarCallbackGoogle(code) {
     }
 }
 
-export async function desconectarGoogleSheets() {
-    try {
-        const usuario = await obtenerUsuarioActual()
-        if (!usuario) {
-            throw new Error('Usuario no autenticado')
-        }
-
-        await db.execute(`
-            UPDATE google_sheets_conexiones 
-            SET estado = 'desconectado',
-                access_token = NULL,
-                refresh_token = NULL,
-                expires_at = NULL,
-                fecha_desconexion = NOW()
-            WHERE usuario_id = ?
-        `, [usuario.id])
-
-        await db.execute(`
-            INSERT INTO google_sheets_log (
-                usuario_id,
-                operacion,
-                estado_operacion
-            ) VALUES (?, 'desconectar', 'exitoso')
-        `, [usuario.id])
-
-        return {
-            success: true,
-            message: 'Desconectado de Google Sheets'
-        }
-
-    } catch (error) {
-        console.log('Error al desconectar:', error)
-        throw error
-    }
-}
-
-async function obtenerClienteAutenticado() {
-    const usuario = await obtenerUsuarioActual()
-    if (!usuario) {
-        throw new Error('Usuario no autenticado')
-    }
-
-    const [conexionRows] = await db.execute(`
-        SELECT * FROM google_sheets_conexiones 
-        WHERE usuario_id = ? AND estado = 'conectado'
-        LIMIT 1
-    `, [usuario.id])
-
-    if (conexionRows.length === 0) {
-        throw new Error('No hay conexión activa con Google Sheets')
-    }
-
-    const conexion = conexionRows[0]
-    const config = await obtenerConfiguracionGoogle()
-
-    const oauth2Client = new google.auth.OAuth2(
-        config.client_id,
-        config.client_secret,
-        config.redirect_uri
-    )
-
-    oauth2Client.setCredentials({
-        access_token: conexion.access_token,
-        refresh_token: conexion.refresh_token,
-        expiry_date: conexion.expires_at
-    })
-
-    if (oauth2Client.isTokenExpiring()) {
-        try {
-            const { credentials } = await oauth2Client.refreshAccessToken()
-            oauth2Client.setCredentials(credentials)
-            
-            await db.execute(`
-                UPDATE google_sheets_conexiones 
-                SET access_token = ?,
-                    expires_at = ?
-                WHERE usuario_id = ?
-            `, [
-                credentials.access_token,
-                credentials.expiry_date ? new Date(credentials.expiry_date) : null,
-                usuario.id
-            ])
-        } catch (refreshError) {
-            console.log('Error al refrescar token:', refreshError)
-            
-            await db.execute(`
-                UPDATE google_sheets_conexiones 
-                SET estado = 'token_expirado'
-                WHERE usuario_id = ?
-            `, [usuario.id])
-            
-            throw new Error('Token expirado, reconecta tu cuenta')
-        }
-    }
-
-    return oauth2Client
-}
-
 export async function obtenerSpreadsheets() {
     try {
         const auth = await obtenerClienteAutenticado()
-        const sheets = google.sheets({ version: 'v4', auth })
         const drive = google.drive({ version: 'v3', auth })
 
         const response = await drive.files.list({
@@ -411,6 +419,7 @@ export async function obtenerSpreadsheets() {
         
         for (const file of response.data.files) {
             try {
+                const sheets = google.sheets({ version: 'v4', auth })
                 const sheetResponse = await sheets.spreadsheets.get({
                     spreadsheetId: file.id,
                     fields: 'sheets(properties(sheetId,title))'
@@ -658,7 +667,7 @@ export async function importarContactosDeSheet(spreadsheetId, sheetName) {
                             estado,
                             origen,
                             fecha_creacion
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', NOW())
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'google_sheets', NOW())
                     `, [
                         fila.Nombre || null,
                         fila.Apellidos || null,
@@ -972,8 +981,7 @@ export async function eliminarSheet(spreadsheetId, nombreSheet) {
         if (usuario) {
             await db.execute(`
                 INSERT INTO google_sheets_log (
-                    usuario_id,
-                    operacion,
+                    usuario_id,operacion,
                     estado_operacion,
                     mensaje_error
                 ) VALUES (?, 'eliminar_sheet', 'fallido', ?)
@@ -1213,6 +1221,153 @@ export async function obtenerConfiguracionesDisponibles() {
 
     } catch (error) {
         console.log('Error al obtener configuraciones:', error)
+        throw error
+    }
+}
+
+export async function crearSpreadsheetCompleto(nombre, descripcion = '') {
+    try {
+        const usuario = await obtenerUsuarioActual()
+        if (!usuario) {
+            throw new Error('Usuario no autenticado')
+        }
+
+        const auth = await obtenerClienteAutenticado()
+        const sheets = google.sheets({ version: 'v4', auth })
+
+        const response = await sheets.spreadsheets.create({
+            resource: {
+                properties: {
+                    title: nombre
+                },
+                sheets: [{
+                    properties: {
+                        title: 'Contactos'
+                    }
+                }]
+            }
+        })
+
+        const spreadsheetId = response.data.spreadsheetId
+
+        const headers = [
+            'ID', 'Nombre', 'Apellidos', 'Teléfono', 'Email',
+            'WhatsApp ID', 'Instagram ID', 'Facebook ID',
+            'Ciudad', 'País', 'Estado', 'Origen',
+            'Primera Interacción', 'Última Interacción', 'Fecha Creación'
+        ]
+
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: spreadsheetId,
+            range: 'Contactos!A1:O1',
+            valueInputOption: 'RAW',
+            resource: {
+                values: [headers]
+            }
+        })
+
+        await sheets.spreadsheets.batchUpdate({
+            spreadsheetId: spreadsheetId,
+            resource: {
+                requests: [{
+                    repeatCell: {
+                        range: {
+                            sheetId: 0,
+                            startRowIndex: 0,
+                            endRowIndex: 1
+                        },
+                        cell: {
+                            userEnteredFormat: {
+                                backgroundColor: {
+                                    red: 0.9,
+                                    green: 0.9,
+                                    blue: 0.9
+                                },
+                                textFormat: {
+                                    bold: true
+                                }
+                            }
+                        },
+                        fields: 'userEnteredFormat(backgroundColor,textFormat)'
+                    }
+                }]
+            }
+        })
+
+        await db.execute(`
+            INSERT INTO google_sheets_log (
+                usuario_id,
+                operacion,
+                spreadsheet_id,
+                sheet_name,
+                registros_procesados,
+                estado_operacion,
+                detalles
+            ) VALUES (?, 'crear_spreadsheet', ?, 'Contactos', 0, 'exitoso', ?)
+        `, [usuario.id, spreadsheetId, JSON.stringify({ 
+            nombre: nombre,
+            descripcion: descripcion,
+            url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}`
+        })])
+
+        return {
+            success: true,
+            spreadsheetId: spreadsheetId,
+            url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}`,
+            message: 'Hoja de cálculo creada exitosamente'
+        }
+
+    } catch (error) {
+        console.log('Error al crear spreadsheet:', error)
+        
+        const usuario = await obtenerUsuarioActual()
+        if (usuario) {
+            await db.execute(`
+                INSERT INTO google_sheets_log (
+                    usuario_id,
+                    operacion,
+                    estado_operacion,
+                    mensaje_error
+                ) VALUES (?, 'crear_spreadsheet', 'fallido', ?)
+            `, [usuario.id, error.message])
+        }
+        
+        throw error
+    }
+}
+
+export async function desconectarGoogleSheets() {
+    try {
+        const usuario = await obtenerUsuarioActual()
+        if (!usuario) {
+            throw new Error('Usuario no autenticado')
+        }
+
+        await db.execute(`
+            UPDATE google_sheets_conexiones 
+            SET estado = 'desconectado',
+                access_token = NULL,
+                refresh_token = NULL,
+                expires_at = NULL,
+                fecha_desconexion = NOW()
+            WHERE usuario_id = ?
+        `, [usuario.id])
+
+        await db.execute(`
+            INSERT INTO google_sheets_log (
+                usuario_id,
+                operacion,
+                estado_operacion
+            ) VALUES (?, 'desconectar', 'exitoso')
+        `, [usuario.id])
+
+        return {
+            success: true,
+            message: 'Desconectado de Google Sheets'
+        }
+
+    } catch (error) {
+        console.log('Error al desconectar:', error)
         throw error
     }
 }
